@@ -7,78 +7,49 @@ use std::{
         },
         Mutex,
         Arc,
-        Condvar,
+        mpsc::Sender,
+        mpsc,
     },
     thread,
     num::NonZeroUsize,
 };
 
-struct Signal {
-    cond: Condvar,
-    mutex: Mutex<()>,
-}
-
-impl Signal {
-    fn new() -> Self {
-        Signal {
-            cond: Condvar::new(),
-            mutex: Mutex::new(()),
-        }
-    }
-
-    fn wait(&self) {
-        let guard = self.mutex.lock().unwrap();
-        let _unused_guard = self.cond.wait(guard).unwrap();
-    }
-}
+type Job = Box<dyn FnOnce() + Send + 'static>;
 
 pub struct CustomThreadPool {
     threads: Vec::<JoinHandle<()>>,
-    tasks: Arc<Mutex<Vec::<Box<dyn FnOnce() + Send>>>>,
     shutdown: Arc<AtomicBool>,
-    signal: Arc<Signal>,
+    sender: Sender<Job>,
 }
 
 impl CustomThreadPool {
     pub fn new(size: NonZeroUsize) -> Self {
+        let (sender, receiver) = mpsc::channel();
+
+        let receiver = Arc::new(Mutex::new(receiver));
+
         let mut thread_pool = CustomThreadPool {
             threads: Vec::new(),
-            tasks: Arc::new(Mutex::new(Vec::new())),
             shutdown: Arc::new(AtomicBool::from(false)),
-            signal: Arc::new(Signal::new()),
+            sender,
         };
 
         for i in 0..size.into() {
-            let shutdown_clone = thread_pool.shutdown.clone();
-            let tasks_clone = thread_pool.tasks.clone();
-            let signal_clone = thread_pool.signal.clone();
+            let shutdown_clone = Arc::clone(&thread_pool.shutdown);
+            let receiver_clone = Arc::clone(&receiver);
+
             thread_pool.threads.push(
                 thread::spawn(move || {
                     println!("Thread {i} started");
-
                     loop {
+                        let job = receiver_clone.lock().unwrap().recv().unwrap();
+
                         if shutdown_clone.load(Ordering::Acquire) {
-                            println!("Thread {i} shutting down");
-                            break;
+                            break
                         }
 
-                        let task =
-                            {
-                                //The lock will be held as long as the MutexGuard is alive. So I
-                                // need to create a scope to make sure the lock is not held for the
-                                // duration of the task being run.
-                                let mut all_tasks = tasks_clone.lock().unwrap();
-
-                                all_tasks.pop()
-                            };
-
-                        if let Some(t) = task {
-                            println!("Thread {i} running task");
-                            t();
-                        } else {
-                            println!("Thread {i} sleeping");
-                            signal_clone.wait();
-                        }
+                        println!("Thread {i} running");
+                        job();
                     }
                 })
             );
@@ -87,22 +58,18 @@ impl CustomThreadPool {
         thread_pool
     }
 
-    pub fn add_task<F>(&mut self, job: F) where F: FnOnce() + 'static + Send {
-        {
-            let mut unlocked_tasks = self.tasks.lock().unwrap();
-            unlocked_tasks.push(Box::from(job));
-        }
-
-        self.signal.cond.notify_one();
+    pub fn add_task<F>(&mut self, task: F) where F: FnOnce() + 'static + Send {
+        let task_ptr = Box::new(task);
+        let _unused_lock = self.sender.send(task_ptr);
     }
 
     pub fn shutdown(&mut self) {
-        {
-            let mut unlocked_tasks = self.tasks.lock().unwrap();
-            unlocked_tasks.clear();
-        }
         self.shutdown.store(true, Ordering::Release);
-        self.signal.cond.notify_all();
+
+        for _ in 0..self.threads.len() {
+            let shutdown_job = Box::new(|| {});
+            let _unused_lock = self.sender.send(shutdown_job);
+        }
     }
 }
 
