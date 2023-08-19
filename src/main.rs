@@ -1,14 +1,11 @@
-use std::{
-    fs,
-    io::{
-        prelude::*,
-        BufReader,
-    }, net::{
-        TcpListener,
-        TcpStream,
-    },
-    num::NonZeroUsize,
-};
+use std::{fs, io::{
+    prelude::*,
+    BufReader,
+}, net::{
+    TcpListener,
+    TcpStream,
+}, num::NonZeroUsize, thread};
+use std::time::Duration;
 use rust_book_chapter_20::CustomThreadPool;
 
 fn main() {

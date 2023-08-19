@@ -1,10 +1,6 @@
 use std::{
     thread::JoinHandle,
     sync::{
-        atomic::{
-            AtomicBool,
-            Ordering,
-        },
         Mutex,
         Arc,
         mpsc::Sender,
@@ -17,9 +13,8 @@ use std::{
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
 pub struct CustomThreadPool {
-    threads: Vec::<JoinHandle<()>>,
-    shutdown: Arc<AtomicBool>,
-    sender: Sender<Job>,
+    threads: Vec<JoinHandle<()>>,
+    sender: Option<Sender<Job>>,
 }
 
 impl CustomThreadPool {
@@ -30,26 +25,26 @@ impl CustomThreadPool {
 
         let mut thread_pool = CustomThreadPool {
             threads: Vec::new(),
-            shutdown: Arc::new(AtomicBool::from(false)),
-            sender,
+            sender: Some(sender),
         };
 
         for i in 0..size.into() {
-            let shutdown_clone = Arc::clone(&thread_pool.shutdown);
             let receiver_clone = Arc::clone(&receiver);
 
             thread_pool.threads.push(
-                thread::spawn(move || {
-                    println!("Thread {i} started");
-                    loop {
-                        let job = receiver_clone.lock().unwrap().recv().unwrap();
+                thread::spawn(move || loop {
+                    println!("Thread {i} waiting for job.");
+                    let job_result = receiver_clone.lock().unwrap().recv();
 
-                        if shutdown_clone.load(Ordering::Acquire) {
-                            break
+                    match job_result {
+                        Ok(job) => {
+                            println!("Thread {i} running.");
+                            job();
                         }
-
-                        println!("Thread {i} running");
-                        job();
+                        Err(_) => {
+                            println!("Thread {i} shutting down.");
+                            break;
+                        }
                     }
                 })
             );
@@ -60,16 +55,13 @@ impl CustomThreadPool {
 
     pub fn add_task<F>(&mut self, task: F) where F: FnOnce() + 'static + Send {
         let task_ptr = Box::new(task);
-        let _unused_lock = self.sender.send(task_ptr);
+        if let Some(sender) = &self.sender {
+            sender.send(task_ptr).unwrap();
+        }
     }
 
     pub fn shutdown(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
-
-        for _ in 0..self.threads.len() {
-            let shutdown_job = Box::new(|| {});
-            let _unused_lock = self.sender.send(shutdown_job);
-        }
+        drop(self.sender.take());
     }
 }
 
